@@ -2,6 +2,8 @@
 /build/
 /cmake-build-*/
 _deps/
+build-config.log
+build-compile.log
 *.o
 *.a
 *.obj
