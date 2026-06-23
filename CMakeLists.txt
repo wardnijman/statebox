@@ -18,4 +18,5 @@ FetchContent_MakeAvailable(JUCE)
 # --- Targets -----------------------------------------------------------------
 # The Capture Tool is built first (see CLAUDE.md §10). The plugin target is added
 # later once the capture/.dcpack format is exercised end-to-end.
+enable_testing()
 add_subdirectory(tools/capture)

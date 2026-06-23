@@ -4,6 +4,7 @@
 _deps/
 build-config.log
 build-compile.log
+build-test.log
 *.o
 *.a
 *.obj
