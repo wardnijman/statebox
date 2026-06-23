@@ -2,6 +2,7 @@
 
 #include "core/SweepSynth.h"
 #include "core/Deconvolution.h"
+#include "core/HarmonicSeparation.h"
 
 #include <cmath>
 #include <iostream>
@@ -22,6 +23,26 @@ int argMaxAbs (const std::vector<float>& v)
     }
     return idx;
 }
+
+float maxAbs (const std::vector<float>& v)
+{
+    float m = 0.0f;
+    for (const float s : v)
+        m = juce::jmax (m, std::abs (s));
+    return m;
+}
+
+// Push the sweep through a memoryless polynomial y = x + a2*x^2 + a3*x^3.
+std::vector<float> polyNonlinearity (const std::vector<float>& x, float a2, float a3)
+{
+    std::vector<float> y (x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const float s = x[i];
+        y[i] = s + a2 * s * s + a3 * s * s * s;
+    }
+    return y;
+}
 } // namespace
 
 class SweepDeconvTests : public juce::UnitTest
@@ -32,9 +53,6 @@ public:
     void runTest() override
     {
         SweepSpec spec;
-        spec.sampleRate      = 48000.0;
-        spec.startHz         = 20.0;
-        spec.endHz           = 20000.0;
         spec.durationSeconds = 1.0; // short, for a fast test
         SweepSynth synth (spec);
         const int N = synth.length();
@@ -89,7 +107,77 @@ public:
     }
 };
 
-static SweepDeconvTests sweepDeconvTests;
+class HarmonicSeparationTests : public juce::UnitTest
+{
+public:
+    HarmonicSeparationTests() : juce::UnitTest ("Harmonic separation") {}
+
+    void runTest() override
+    {
+        SweepSpec spec;
+        spec.durationSeconds = 1.0;
+        SweepSynth synth (spec);
+
+        const int kernelLen = 512;
+        const int centre    = kernelLen / 2;
+
+        beginTest ("h2/h3 land at the predicted offsets, centred in their windows");
+        {
+            const auto y      = polyNonlinearity (synth.sweep(), 0.25f, 0.1f);
+            const auto decon  = deconvolve (y, synth.inverseFilter(), synth.length());
+            const auto k      = separateHarmonics (decon, synth, 3, kernelLen);
+
+            // The peak of each harmonic window should sit at the window centre,
+            // i.e. exactly at the predicted ln(m) offset.
+            expect (std::abs (argMaxAbs (k[1]) - centre) <= 4, "h2 peak off-centre");
+            expect (std::abs (argMaxAbs (k[2]) - centre) <= 4, "h3 peak off-centre");
+
+            // Both harmonics are present relative to the linear IR.
+            const float h1 = maxAbs (k[0]);
+            expectGreaterThan (maxAbs (k[1]) / h1, 0.01f, "h2 should be present");
+            expectGreaterThan (maxAbs (k[2]) / h1, 0.01f, "h3 should be present");
+        }
+
+        beginTest ("x^2 produces only even harmonics; x^3 only odd");
+        {
+            // Square only -> 2nd harmonic present, 3rd absent.
+            const auto kSq = separateHarmonics (
+                deconvolve (polyNonlinearity (synth.sweep(), 0.25f, 0.0f),
+                            synth.inverseFilter(), synth.length()),
+                synth, 3, kernelLen);
+            expectGreaterThan (maxAbs (kSq[1]), 10.0f * maxAbs (kSq[2]),
+                               "x^2: h2 should dominate h3");
+
+            // Cube only -> 3rd harmonic present, 2nd absent.
+            const auto kCu = separateHarmonics (
+                deconvolve (polyNonlinearity (synth.sweep(), 0.0f, 0.1f),
+                            synth.inverseFilter(), synth.length()),
+                synth, 3, kernelLen);
+            expectGreaterThan (maxAbs (kCu[2]), 10.0f * maxAbs (kCu[1]),
+                               "x^3: h3 should dominate h2");
+        }
+
+        beginTest ("3rd-harmonic amplitude scales linearly with cubic coefficient");
+        {
+            const auto kA = separateHarmonics (
+                deconvolve (polyNonlinearity (synth.sweep(), 0.0f, 0.1f),
+                            synth.inverseFilter(), synth.length()),
+                synth, 3, kernelLen);
+            const auto kB = separateHarmonics (
+                deconvolve (polyNonlinearity (synth.sweep(), 0.0f, 0.3f),
+                            synth.inverseFilter(), synth.length()),
+                synth, 3, kernelLen);
+
+            const float ratio = maxAbs (kB[2]) / maxAbs (kA[2]);
+            expectWithinAbsoluteError (ratio, 3.0f, 0.3f,
+                                       "h3 should scale ~3x for 3x cubic coeff (got "
+                                       + juce::String (ratio) + ")");
+        }
+    }
+};
+
+static SweepDeconvTests        sweepDeconvTests;
+static HarmonicSeparationTests harmonicSeparationTests;
 
 int main()
 {
