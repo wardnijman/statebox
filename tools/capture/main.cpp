@@ -12,10 +12,13 @@
 #include <iostream>
 
 #include <juce_core/juce_core.h>
+#include <juce_events/juce_events.h>
+#include <juce_audio_devices/juce_audio_devices.h>
 
 #include "core/SweepSynth.h"
 #include "core/DcPack.h"
 #include "core/CapturePipeline.h"
+#include "core/LiveCaptureEngine.h"
 
 using namespace statebox::capture;
 
@@ -45,6 +48,33 @@ SweepSpec sweepFromArgs (const juce::ArgumentList& args)
     if (const auto v = optValue (args, "--duration"); v.isNotEmpty()) s.durationSeconds = v.getDoubleValue();
     return s;
 }
+
+// Bridges the audio device to the (hardware-agnostic) LiveCaptureEngine.
+class LoopbackCallback : public juce::AudioIODeviceCallback
+{
+public:
+    explicit LoopbackCallback (LiveCaptureEngine& e) : engine (e) {}
+
+    void audioDeviceIOCallbackWithContext (const float* const* in, int numIn,
+                                           float* const* out, int numOut,
+                                           int numSamples,
+                                           const juce::AudioIODeviceCallbackContext&) override
+    {
+        const float* input = (numIn > 0) ? in[0] : nullptr;
+        if (numOut > 0 && out[0] != nullptr)
+        {
+            engine.processBlock (input, out[0], numSamples);
+            for (int ch = 1; ch < numOut; ++ch)
+                if (out[ch] != nullptr)
+                    juce::FloatVectorOperations::copy (out[ch], out[0], numSamples);
+        }
+    }
+
+    void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
+    void audioDeviceStopped() override {}
+
+    LiveCaptureEngine& engine;
+};
 } // namespace
 
 int main (int argc, char* argv[])
@@ -116,6 +146,83 @@ int main (int argc, char* argv[])
                                     << " (sr=" << spec.sampleRate
                                     << ", kernelLength=" << kernelLength
                                     << ", harmonics 2.." << maxHarmonic << ")\n";
+                      } });
+
+    app.addCommand ({ "capture-live",
+                      "capture-live --out UNIT.dcpack [--sr R --f1 F --f2 F --duration S "
+                      "--reps N --conditioning S --settle S --harmonics N --kernel-length L --name NAME]",
+                      "Capture from the default audio interface (plays the sweep, records the return).",
+                      {},
+                      [] (const juce::ArgumentList& args)
+                      {
+                          const auto outPath = optValue (args, "--out");
+                          if (outPath.isEmpty())
+                              juce::ConsoleApplication::fail ("--out is required");
+
+                          LiveCaptureConfig cfg;
+                          cfg.sweep = sweepFromArgs (args);
+                          if (const auto v = optValue (args, "--reps");         v.isNotEmpty()) cfg.repetitions         = v.getIntValue();
+                          if (const auto v = optValue (args, "--conditioning"); v.isNotEmpty()) cfg.conditioningSeconds = v.getDoubleValue();
+                          if (const auto v = optValue (args, "--settle");       v.isNotEmpty()) cfg.settleSeconds       = v.getDoubleValue();
+
+                          const auto harmonicsArg = optValue (args, "--harmonics");
+                          const auto kernelArg    = optValue (args, "--kernel-length");
+                          const auto nameArg      = optValue (args, "--name");
+                          const int  maxHarmonic  = harmonicsArg.isNotEmpty() ? harmonicsArg.getIntValue() : 3;
+                          const int  kernelLength = kernelArg.isNotEmpty()    ? kernelArg.getIntValue()    : 4096;
+                          const auto name         = nameArg.isNotEmpty()      ? nameArg : juce::String ("Captured Unit");
+
+                          LiveCaptureEngine engine (cfg);
+
+                          // A minimal message system for the device manager. No GUI / event loop is
+                          // needed for a one-shot capture: the audio callback runs on the device thread.
+                          juce::MessageManager::getInstance();
+                          {
+                              juce::AudioDeviceManager dm;
+                              juce::AudioDeviceManager::AudioDeviceSetup setup;
+                              setup.sampleRate = cfg.sweep.sampleRate;
+
+                              const auto initErr = dm.initialise (1, 1, nullptr, true, {}, &setup);
+                              if (initErr.isNotEmpty())
+                                  juce::ConsoleApplication::fail ("audio device init failed: " + initErr);
+
+                              if (auto* dev = dm.getCurrentAudioDevice())
+                                  std::cout << "Device: " << dev->getName()
+                                            << " @ " << dev->getCurrentSampleRate() << " Hz, in="
+                                            << dev->getActiveInputChannels().countNumberOfSetBits()
+                                            << " out=" << dev->getActiveOutputChannels().countNumberOfSetBits() << "\n";
+
+                              LoopbackCallback cb (engine);
+                              dm.addAudioCallback (&cb);
+                              std::cout << "Capturing " << cfg.repetitions << " repetition(s)...\n";
+
+                              const double perRep    = cfg.conditioningSeconds + 2.0 * cfg.settleSeconds + cfg.sweep.durationSeconds;
+                              const int    maxWaitMs  = (int) ((perRep * cfg.repetitions + 5.0) * 2.0 * 1000.0);
+                              int          waited     = 0;
+                              while (! engine.isFinished() && waited < maxWaitMs)
+                              {
+                                  juce::Thread::sleep (50);
+                                  waited += 50;
+                              }
+                              dm.removeAudioCallback (&cb);
+                              dm.closeAudioDevice();
+
+                              if (! engine.isFinished())
+                                  juce::ConsoleApplication::fail ("capture timed out (no audio callbacks?)");
+                          }
+
+                          engine.finalize();
+                          SweepSynth synth (cfg.sweep);
+                          auto kernels = processRecording (engine.meanRecording(), synth, maxHarmonic, kernelLength);
+                          auto profile = buildSingleCellProfile (std::move (kernels), cfg.sweep, maxHarmonic,
+                                                                 kernelLength, name.toStdString());
+                          normalizeProfile (profile, 1.0f);
+
+                          std::string err;
+                          if (! writeDcPack (profile, outPath.toStdString(), &err))
+                              juce::ConsoleApplication::fail ("write .dcpack failed: " + juce::String (err));
+
+                          std::cout << "Wrote .dcpack -> " << outPath << "\n";
                       } });
 
     return app.findAndRunCommand (argc, argv);

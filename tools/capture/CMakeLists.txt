@@ -8,7 +8,8 @@ set(CAPTURE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/HarmonicSeparation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Alignment.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/DcPack.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/CapturePipeline.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/CapturePipeline.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/LiveCaptureEngine.cpp)
 
 set(CAPTURE_JUCE_MODULES
     juce::juce_dsp
@@ -27,6 +28,8 @@ target_compile_definitions(StateboxCapture PRIVATE
     JUCE_WEB_BROWSER=0)
 target_link_libraries(StateboxCapture PRIVATE
     ${CAPTURE_JUCE_MODULES}
+    juce::juce_audio_devices
+    juce::juce_events
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
 

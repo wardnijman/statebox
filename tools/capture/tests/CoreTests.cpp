@@ -6,6 +6,7 @@
 #include "core/Alignment.h"
 #include "core/DcPack.h"
 #include "core/CapturePipeline.h"
+#include "core/LiveCaptureEngine.h"
 
 #include <cmath>
 #include <iostream>
@@ -447,11 +448,78 @@ public:
     }
 };
 
+class LiveCaptureTests : public juce::UnitTest
+{
+public:
+    LiveCaptureTests() : juce::UnitTest ("Live capture") {}
+
+    void runTest() override
+    {
+        LiveCaptureConfig cfg;
+        cfg.sweep.durationSeconds = 0.2; // short, for a fast test
+        cfg.conditioningSeconds   = 0.05;
+        cfg.settleSeconds         = 0.05;
+        cfg.repetitions           = 3;
+
+        beginTest ("virtual loopback: drive engine, recover IR + harmonics, get a std map");
+        {
+            LiveCaptureEngine engine (cfg);
+
+            // Virtual device: a known nonlinearity, a round-trip latency, and a tiny
+            // per-sample perturbation (so the std across reps is non-zero).
+            const int D     = 128; // latency, >= block so input comes only from history
+            const int block = 64;
+            auto nonlin = [] (float x) { return x + 0.25f * x * x + 0.1f * x * x * x; };
+
+            std::vector<float> outAll;
+            outAll.reserve (1u << 20);
+            std::vector<float> inB ((size_t) block), outB ((size_t) block);
+
+            int g = 0;
+            while (! engine.isFinished())
+            {
+                for (int i = 0; i < block; ++i)
+                {
+                    const int src = g + i - D;
+                    const float o = (src >= 0 && src < (int) outAll.size()) ? outAll[(size_t) src] : 0.0f;
+                    inB[(size_t) i] = nonlin (o) + 1.0e-4f * (float) std::sin (0.013 * (g + i));
+                }
+                engine.processBlock (inB.data(), outB.data(), block);
+                for (int i = 0; i < block; ++i) outAll.push_back (outB[(size_t) i]);
+                g += block;
+                if (g > 5'000'000) break; // safety
+            }
+
+            expect (engine.isFinished(), "engine should finish");
+            engine.finalize();
+
+            expectEquals ((int) engine.rawRecordings().size(), 3);
+            expectEquals ((int) engine.meanRecording().size(), engine.recordLengthSamples());
+
+            float maxStd = 0.0f;
+            for (const float s : engine.stdRecording()) maxStd = juce::jmax (maxStd, s);
+            expectGreaterThan (maxStd, 0.0f, "std map should capture inter-rep variation");
+            expectLessThan (maxStd, 0.1f, "std should be small");
+
+            // The averaged recording should still yield a clean IR + harmonics.
+            SweepSynth synth (cfg.sweep);
+            const int  K      = 256;
+            const int  target = K / 2;
+            const auto c      = processRecording (engine.meanRecording(), synth, 3, K);
+
+            expect (std::abs (argMaxAbs (c.linear) - target) <= 3, "recovered linear IR centred");
+            expectEquals ((int) c.harmonics.size(), 2);
+            expectGreaterThan (maxAbs (c.harmonics[0]) / maxAbs (c.linear), 0.01f, "h2 present from loopback");
+        }
+    }
+};
+
 static SweepDeconvTests        sweepDeconvTests;
 static HarmonicSeparationTests harmonicSeparationTests;
 static AlignmentTests          alignmentTests;
 static DcPackTests             dcPackTests;
 static CapturePipelineTests    capturePipelineTests;
+static LiveCaptureTests        liveCaptureTests;
 
 int main()
 {
