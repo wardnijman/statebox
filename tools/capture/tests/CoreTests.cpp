@@ -3,6 +3,7 @@
 #include "core/SweepSynth.h"
 #include "core/Deconvolution.h"
 #include "core/HarmonicSeparation.h"
+#include "core/Alignment.h"
 
 #include <cmath>
 #include <iostream>
@@ -176,8 +177,83 @@ public:
     }
 };
 
+class AlignmentTests : public juce::UnitTest
+{
+public:
+    AlignmentTests() : juce::UnitTest ("Sub-sample alignment") {}
+
+    static std::vector<float> gaussianPulse (int n, double centre, double sigma)
+    {
+        std::vector<float> v ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const double d = (double) i - centre;
+            v[(size_t) i] = (float) std::exp (-(d * d) / (2.0 * sigma * sigma));
+        }
+        return v;
+    }
+
+    static std::vector<float> tone (int n, double cycles)
+    {
+        std::vector<float> v ((size_t) n);
+        for (int i = 0; i < n; ++i)
+            v[(size_t) i] = (float) std::sin (2.0 * M_PI * cycles * (double) i / (double) n);
+        return v;
+    }
+
+    void runTest() override
+    {
+        beginTest ("fractional shift matches an analytic phase shift on a pure tone");
+        {
+            const int    N   = 1024;
+            const double cyc  = 8.0;  // exact FFT bin -> periodic -> circular shift is exact
+            const double d    = 0.37;
+            const auto   x    = tone (N, cyc);
+            const auto   y    = fractionalShift (x, d);
+
+            float maxErr = 0.0f;
+            for (int n = 0; n < N; ++n)
+            {
+                const double a = std::sin (2.0 * M_PI * cyc * ((double) n - d) / (double) N);
+                maxErr = juce::jmax (maxErr, std::abs (y[(size_t) n] - (float) a));
+            }
+            expectLessThan (maxErr, 1.0e-3f, "shifted tone deviates from analytic");
+        }
+
+        beginTest ("peak estimate tracks a sub-sample shift");
+        {
+            const int  N = 512;
+            const auto g = gaussianPulse (N, 256.0, 3.0);
+            expectWithinAbsoluteError ((float) estimatePeakPosition (g), 256.0f, 0.02f,
+                                       "unshifted peak");
+            const auto gs = fractionalShift (g, 0.3);
+            expectWithinAbsoluteError ((float) estimatePeakPosition (gs), 256.3f, 0.05f,
+                                       "shifted peak");
+        }
+
+        beginTest ("alignPeakTo removes a known offset and recovers the waveform");
+        {
+            const int  N = 512;
+            const auto g = gaussianPulse (N, 256.0, 3.0);
+            const auto gs = fractionalShift (g, 0.42);
+            const auto aligned = alignPeakTo (gs, 256.0);
+
+            expectWithinAbsoluteError ((float) estimatePeakPosition (aligned), 256.0f, 0.05f,
+                                       "aligned peak position");
+
+            // Recovering the original waveform means two aligned copies sum
+            // cleanly rather than combing (CLAUDE.md §5.4).
+            float maxDiff = 0.0f;
+            for (int n = 0; n < N; ++n)
+                maxDiff = juce::jmax (maxDiff, std::abs (aligned[(size_t) n] - g[(size_t) n]));
+            expectLessThan (maxDiff, 0.05f, "aligned waveform should match original");
+        }
+    }
+};
+
 static SweepDeconvTests        sweepDeconvTests;
 static HarmonicSeparationTests harmonicSeparationTests;
+static AlignmentTests          alignmentTests;
 
 int main()
 {

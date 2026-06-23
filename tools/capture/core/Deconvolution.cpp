@@ -41,12 +41,11 @@ std::vector<float> linearConvolveFFT (const std::vector<float>& a,
     std::vector<C> out ((size_t) fftSize);
     fft.perform (product.data(), out.data(), true);
 
-    // perform()'s inverse transform is unnormalised; scale by 1/fftSize so the
-    // result equals a true linear convolution.
-    const float scale = 1.0f / (float) fftSize;
+    // perform() normalises the inverse transform (1/N), so IFFT(A*B) already
+    // equals the (zero-padded -> linear) convolution; no extra scaling needed.
     std::vector<float> result ((size_t) convLen);
     for (int i = 0; i < convLen; ++i)
-        result[(size_t) i] = out[(size_t) i].real() * scale;
+        result[(size_t) i] = out[(size_t) i].real();
 
     return result;
 }
