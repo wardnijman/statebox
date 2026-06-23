@@ -5,6 +5,7 @@
 #include "core/HarmonicSeparation.h"
 #include "core/Alignment.h"
 #include "core/DcPack.h"
+#include "core/CapturePipeline.h"
 
 #include <cmath>
 #include <iostream>
@@ -375,10 +376,82 @@ public:
     }
 };
 
+class CapturePipelineTests : public juce::UnitTest
+{
+public:
+    CapturePipelineTests() : juce::UnitTest ("Capture pipeline") {}
+
+    void runTest() override
+    {
+        SweepSpec spec;
+        spec.durationSeconds = 1.0;
+        SweepSynth synth (spec);
+
+        const int K      = 512;
+        const int target = K / 2;
+
+        beginTest ("pipeline recovers an aligned linear IR + harmonics");
+        {
+            const auto rec = polyNonlinearity (synth.sweep(), 0.25f, 0.1f);
+            const auto c   = processRecording (rec, synth, 3, K);
+
+            expectEquals ((int) c.harmonics.size(), 2);
+            expect (std::abs (argMaxAbs (c.linear) - target) <= 2, "linear IR peak should be centred");
+
+            const float h1 = maxAbs (c.linear);
+            expectGreaterThan (maxAbs (c.harmonics[0]) / h1, 0.01f, "h2 present");
+            expectGreaterThan (maxAbs (c.harmonics[1]) / h1, 0.005f, "h3 present");
+        }
+
+        beginTest ("pipeline compensates round-trip latency");
+        {
+            const int  D = 40;
+            const auto y = polyNonlinearity (synth.sweep(), 0.25f, 0.1f);
+            std::vector<float> rec ((size_t) ((int) y.size() + D), 0.0f);
+            for (size_t i = 0; i < y.size(); ++i)
+                rec[i + (size_t) D] = y[i];
+
+            const auto c = processRecording (rec, synth, 3, K);
+            expect (std::abs (argMaxAbs (c.linear) - target) <= 2,
+                    "linear IR peak should be centred despite latency");
+            expectGreaterThan (maxAbs (c.harmonics[0]) / maxAbs (c.linear), 0.01f, "h2 present");
+        }
+
+        beginTest ("end-to-end: process -> writeDcPack -> readDcPack");
+        {
+            const auto rec     = polyNonlinearity (synth.sweep(), 0.25f, 0.1f);
+            auto       kernels = processRecording (rec, synth, 3, K);
+            auto       profile = buildSingleCellProfile (kernels, spec, 3, K, "E2E Unit");
+            normalizeProfile (profile, 1.0f);
+
+            const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                 .getChildFile ("statebox_e2e_" + juce::Uuid().toString());
+            std::string err;
+            expect (writeDcPack (profile, dir.getFullPathName().toStdString(), &err),
+                    "write: " + juce::String (err));
+
+            CaptureProfile q;
+            std::string err2;
+            expect (readDcPack (dir.getFullPathName().toStdString(), q, &err2),
+                    "read: " + juce::String (err2));
+
+            expectEquals ((int) q.cells.size(), 1);
+            if (! q.cells.empty())
+            {
+                expect (std::abs (argMaxAbs (q.cells[0].linear) - target) <= 2,
+                        "read-back linear peak centred");
+                expectEquals ((int) q.cells[0].harmonics.size(), 2);
+            }
+            dir.deleteRecursively();
+        }
+    }
+};
+
 static SweepDeconvTests        sweepDeconvTests;
 static HarmonicSeparationTests harmonicSeparationTests;
 static AlignmentTests          alignmentTests;
 static DcPackTests             dcPackTests;
+static CapturePipelineTests    capturePipelineTests;
 
 int main()
 {

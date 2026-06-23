@@ -65,7 +65,7 @@ bool writeWav (const juce::File& f, const std::vector<float>& data, double sr, s
     return ok;
 }
 
-bool readWav (const juce::File& f, std::vector<float>& out, std::string* err)
+bool readWav (const juce::File& f, std::vector<float>& out, double* sampleRateOut, std::string* err)
 {
     if (! f.existsAsFile())
     {
@@ -87,6 +87,9 @@ bool readWav (const juce::File& f, std::vector<float>& out, std::string* err)
         if (err) *err = "cannot read WAV " + f.getFullPathName().toStdString();
         return false;
     }
+
+    if (sampleRateOut != nullptr)
+        *sampleRateOut = reader->sampleRate;
 
     const int n = (int) reader->lengthInSamples;
     juce::AudioBuffer<float> buf ((int) juce::jmax (1u, reader->numChannels), juce::jmax (1, n));
@@ -118,6 +121,16 @@ void axisFromVar (const juce::var& v, ProfileAxis& a)
         for (auto& e : *arr) a.values.push_back ((float) e);
 }
 } // namespace
+
+bool writeWavFile (const std::string& path, const std::vector<float>& data, double sampleRate, std::string* error)
+{
+    return writeWav (juce::File { juce::String (path) }, data, sampleRate, error);
+}
+
+bool readWavFile (const std::string& path, std::vector<float>& out, double* sampleRateOut, std::string* error)
+{
+    return readWav (juce::File { juce::String (path) }, out, sampleRateOut, error);
+}
 
 void normalizeProfile (CaptureProfile& profile, float targetPeak)
 {
@@ -251,7 +264,7 @@ bool readDcPack (const std::string& dirPath, CaptureProfile& out, std::string* e
             c.channel    = (int) cv.getProperty ("channel", 0);
             c.gain       = (float) cv.getProperty ("gain", 1.0f);
 
-            if (! readWav (dir.getChildFile (cv.getProperty ("linearFile", "").toString()), c.linear, error))
+            if (! readWav (dir.getChildFile (cv.getProperty ("linearFile", "").toString()), c.linear, nullptr, error))
                 return false;
 
             if (auto* hfs = cv.getProperty ("harmonicFiles", juce::var()).getArray())
@@ -259,7 +272,7 @@ bool readDcPack (const std::string& dirPath, CaptureProfile& out, std::string* e
                 for (auto& hv : *hfs)
                 {
                     std::vector<float> h;
-                    if (! readWav (dir.getChildFile (hv.toString()), h, error))
+                    if (! readWav (dir.getChildFile (hv.toString()), h, nullptr, error))
                         return false;
                     c.harmonics.push_back (std::move (h));
                 }

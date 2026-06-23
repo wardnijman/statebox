@@ -60,4 +60,8 @@ void normalizeProfile (CaptureProfile& profile, float targetPeak = 1.0f);
 bool writeDcPack (const CaptureProfile& profile, const std::string& dirPath, std::string* error = nullptr);
 bool readDcPack  (const std::string& dirPath, CaptureProfile& out, std::string* error = nullptr);
 
+// Mono 32-bit-float WAV read/write helpers (used by the capture pipeline + CLI).
+bool writeWavFile (const std::string& path, const std::vector<float>& data, double sampleRate, std::string* error = nullptr);
+bool readWavFile  (const std::string& path, std::vector<float>& out, double* sampleRateOut = nullptr, std::string* error = nullptr);
+
 } // namespace statebox::capture
