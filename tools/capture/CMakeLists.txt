@@ -6,7 +6,8 @@ set(CAPTURE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/SweepSynth.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Deconvolution.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/HarmonicSeparation.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/Alignment.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/Alignment.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/DcPack.cpp)
 
 set(CAPTURE_JUCE_MODULES
     juce::juce_dsp

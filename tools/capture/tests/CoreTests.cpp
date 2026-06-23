@@ -4,6 +4,7 @@
 #include "core/Deconvolution.h"
 #include "core/HarmonicSeparation.h"
 #include "core/Alignment.h"
+#include "core/DcPack.h"
 
 #include <cmath>
 #include <iostream>
@@ -251,9 +252,133 @@ public:
     }
 };
 
+class DcPackTests : public juce::UnitTest
+{
+public:
+    DcPackTests() : juce::UnitTest ("dcpack I/O") {}
+
+    static CaptureProfile makeSampleProfile()
+    {
+        CaptureProfile p;
+        p.name                = "Test Unit";
+        p.vendor              = "Statebox";
+        p.sampleRate          = 48000.0;
+        p.bitDepth            = 24;
+        p.kernelLengthSamples = 8;
+        p.channels            = 2;
+        p.levelAxis           = ProfileAxis { "level", "dBFS-at-unit-input", { -18.0f, -6.0f } };
+        p.knobAxis            = ProfileAxis { "knob", "normalized", { 0.0f, 1.0f } };
+        p.harmonicOrders      = { 2, 3 };
+
+        int idx = 0;
+        for (int level = 0; level < 2; ++level)
+            for (int knob = 0; knob < 2; ++knob)
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    CaptureKernels c;
+                    c.levelIndex = level;
+                    c.knobIndex  = knob;
+                    c.channel    = ch;
+                    c.gain       = 1.0f;
+
+                    c.linear.resize (8);
+                    for (int s = 0; s < 8; ++s)
+                        c.linear[(size_t) s] = (float) (idx * 0.1 + s * 0.01) - 0.2f;
+
+                    // Two harmonic kernels (h2, h3) with distinctive values.
+                    c.harmonics.resize (2);
+                    for (int order = 0; order < 2; ++order)
+                    {
+                        c.harmonics[(size_t) order].resize (8);
+                        for (int s = 0; s < 8; ++s)
+                            c.harmonics[(size_t) order][(size_t) s]
+                                = (float) ((order + 2) * 0.001 * (s + 1) + idx * 0.0005);
+                    }
+                    p.cells.push_back (c);
+                    ++idx;
+                }
+
+        // An out-of-range value to confirm kernels are stored as float (not clipped).
+        p.cells[0].linear[0] = 2.5f;
+        return p;
+    }
+
+    void runTest() override
+    {
+        beginTest ("normalizeProfile peak-normalizes and scales harmonics together");
+        {
+            CaptureProfile p;
+            CaptureKernels c;
+            c.linear    = { 0.0f, 2.0f, -1.0f };
+            c.harmonics = { { 0.4f, -0.2f } };
+            p.cells.push_back (c);
+
+            normalizeProfile (p, 1.0f);
+
+            float peak = 0.0f;
+            for (const float s : p.cells[0].linear) peak = juce::jmax (peak, std::abs (s));
+            expectWithinAbsoluteError (peak, 1.0f, 1.0e-6f, "linear peak normalized to 1");
+            expectWithinAbsoluteError (p.cells[0].gain, 0.5f, 1.0e-6f, "gain recorded");
+            expectWithinAbsoluteError (p.cells[0].harmonics[0][0], 0.2f, 1.0e-6f, "harmonics scaled by same gain");
+        }
+
+        beginTest ("write/read round-trips metadata and kernel samples (float storage)");
+        {
+            const auto p = makeSampleProfile();
+            const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                 .getChildFile ("statebox_dcpack_" + juce::Uuid().toString());
+
+            std::string err;
+            expect (writeDcPack (p, dir.getFullPathName().toStdString(), &err),
+                    "write failed: " + juce::String (err));
+
+            CaptureProfile q;
+            std::string err2;
+            expect (readDcPack (dir.getFullPathName().toStdString(), q, &err2),
+                    "read failed: " + juce::String (err2));
+
+            expectEquals (q.formatVersion, p.formatVersion);
+            expectEquals (juce::String (q.name), juce::String (p.name));
+            expectWithinAbsoluteError ((float) q.sampleRate, (float) p.sampleRate, 0.5f);
+            expectEquals (q.kernelLengthSamples, p.kernelLengthSamples);
+            expectEquals (q.channels, p.channels);
+            expectEquals ((int) q.levelAxis.values.size(), (int) p.levelAxis.values.size());
+            expectEquals (juce::String (q.levelAxis.unit), juce::String (p.levelAxis.unit));
+            expectEquals ((int) q.harmonicOrders.size(), (int) p.harmonicOrders.size());
+            expectEquals ((int) q.cells.size(), (int) p.cells.size());
+
+            float maxDiff  = 0.0f;
+            bool  foundBig = false;
+            for (size_t i = 0; i < q.cells.size() && i < p.cells.size(); ++i)
+            {
+                const auto& a = p.cells[i];
+                const auto& b = q.cells[i];
+                expectEquals (b.levelIndex, a.levelIndex);
+                expectEquals (b.knobIndex, a.knobIndex);
+                expectEquals (b.channel, a.channel);
+                expectEquals ((int) b.harmonics.size(), (int) a.harmonics.size());
+
+                for (size_t s = 0; s < a.linear.size(); ++s)
+                {
+                    maxDiff = juce::jmax (maxDiff, std::abs (a.linear[s] - b.linear[s]));
+                    if (a.linear[s] > 2.4f) foundBig = true;
+                }
+                for (size_t h = 0; h < a.harmonics.size() && h < b.harmonics.size(); ++h)
+                    for (size_t s = 0; s < a.harmonics[h].size(); ++s)
+                        maxDiff = juce::jmax (maxDiff, std::abs (a.harmonics[h][s] - b.harmonics[h][s]));
+            }
+            expectLessThan (maxDiff, 1.0e-5f, "kernel samples should round-trip");
+            expect (foundBig, "out-of-range value should survive (float WAV storage)");
+
+            dir.deleteRecursively();
+        }
+    }
+};
+
 static SweepDeconvTests        sweepDeconvTests;
 static HarmonicSeparationTests harmonicSeparationTests;
 static AlignmentTests          alignmentTests;
+static DcPackTests             dcPackTests;
 
 int main()
 {
