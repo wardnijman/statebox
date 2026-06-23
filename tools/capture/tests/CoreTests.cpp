@@ -7,6 +7,7 @@
 #include "core/DcPack.h"
 #include "core/CapturePipeline.h"
 #include "core/LiveCaptureEngine.h"
+#include "core/GridCapture.h"
 
 #include <cmath>
 #include <iostream>
@@ -445,6 +446,160 @@ public:
             }
             dir.deleteRecursively();
         }
+
+        beginTest ("analyzeRecording reports peak/SNR and flags clipping & silence");
+        {
+            const int sweepN = 1000, tail = 200;
+            std::vector<float> rec ((size_t) (sweepN + tail), 0.0f);
+            for (int i = 0; i < sweepN; ++i) rec[(size_t) i]            = 0.5f * std::sin (0.1f * i);
+            for (int i = 0; i < tail;   ++i) rec[(size_t) (sweepN + i)] = 0.001f * std::sin (0.3f * i);
+
+            const auto st = analyzeRecording (rec, tail);
+            expectWithinAbsoluteError (st.peak, 0.5f, 1.0e-3f, "peak measured");
+            expect (! st.clipping, "0.5 not clipping");
+            expect (! st.silent, "0.5 not silent");
+            expect (st.snrValid && st.snrDb > 30.0f, "loud sweep over quiet tail -> healthy SNR");
+
+            expect (analyzeRecording (std::vector<float> (500, 1.0f), 100).clipping, "full-scale -> clipping");
+            expect (analyzeRecording (std::vector<float> (500, 0.0f), 100).silent, "zeros -> silent");
+        }
+    }
+};
+
+class GridCaptureTests : public juce::UnitTest
+{
+public:
+    GridCaptureTests() : juce::UnitTest ("Grid capture orchestration") {}
+
+    static GridPlan makePlan()
+    {
+        GridPlan plan;
+        plan.name                  = "Grid Unit";
+        plan.sweep.durationSeconds = 0.2;   // short, for a fast test
+        plan.repetitions           = 1;
+        plan.maxHarmonic           = 3;
+        plan.kernelLength          = 256;
+        plan.levelsDb              = { -12.0f, -6.0f };       // 2 levels
+        plan.knobName              = "cutoff";
+        plan.knobValues            = { 0.0f, 0.5f, 1.0f };    // 3 knobs -> 6 cells
+        return plan;
+    }
+
+    void runTest() override
+    {
+        const auto plan = makePlan();
+        SweepSynth synth (plan.sweep); // identity unit: captureCell returns the sweep itself
+
+        beginTest ("walks the full grid: one cell per (level,knob), axes + indices correct");
+        {
+            int calls = 0, doneCount = 0;
+            auto cap = [&] (int, int, float, float, float) -> CellCapture
+            {
+                ++calls;
+                return { true, false, synth.sweep() };
+            };
+            auto onDone = [&] (const CaptureProfile&) { ++doneCount; };
+
+            const auto profile = assembleProfile (plan, cap, {}, onDone);
+
+            expectEquals (calls, 6, "captureCell called once per cell");
+            expectEquals (doneCount, 6, "onCellDone called once per cell");
+            expectEquals ((int) profile.cells.size(), 6);
+            expectEquals ((int) profile.levelAxis.values.size(), 2);
+            expectEquals ((int) profile.knobAxis.values.size(), 3);
+            expectEquals (juce::String (profile.knobAxis.name), juce::String ("cutoff"));
+            expectEquals (profile.channels, 1, "mono capture");
+
+            std::vector<int> seen (6, 0);
+            for (const auto& c : profile.cells)
+                seen[(size_t) (c.knobIndex * 2 + c.levelIndex)]++;
+            for (int i = 0; i < 6; ++i)
+                expectEquals (seen[(size_t) i], 1, "each (level,knob) present exactly once");
+
+            for (const auto& c : profile.cells)
+            {
+                float pk = 0.0f;
+                for (const float s : c.linear) pk = juce::jmax (pk, std::abs (s));
+                expectWithinAbsoluteError (pk, 1.0f, 1.0e-3f, "each cell normalized to unity peak");
+            }
+        }
+
+        beginTest ("resume: existing cells are kept and their column is not recaptured");
+        {
+            CaptureProfile existing;
+            existing.levelAxis = ProfileAxis { "level", "dBFS-at-output", plan.levelsDb };
+            existing.knobAxis  = ProfileAxis { plan.knobName, plan.knobUnit, plan.knobValues };
+            for (int li = 0; li < 2; ++li) // knob column 0 already captured
+            {
+                CaptureKernels c;
+                c.levelIndex = li;
+                c.knobIndex  = 0;
+                c.linear.assign ((size_t) plan.kernelLength, 0.0f);
+                c.linear[(size_t) (plan.kernelLength / 2)] = 1.0f;
+                existing.cells.push_back (c);
+            }
+
+            int calls = 0;
+            std::vector<std::pair<int, int>> captured;
+            auto cap = [&] (int li, int ki, float, float, float) -> CellCapture
+            {
+                ++calls;
+                captured.push_back ({ li, ki });
+                return { true, false, synth.sweep() };
+            };
+
+            const auto profile = assembleProfile (plan, cap, {}, {}, &existing);
+
+            expectEquals (calls, 4, "only the 4 missing cells are captured");
+            expectEquals ((int) profile.cells.size(), 6, "existing + new = full grid");
+            for (const auto& p : captured)
+                expect (p.second != 0, "the already-captured knob-0 column is skipped");
+        }
+
+        beginTest ("abort stops the grid and keeps cells captured so far");
+        {
+            int calls = 0;
+            auto cap = [&] (int, int, float, float, float) -> CellCapture
+            {
+                ++calls;
+                if (calls == 3) return { false, true, {} }; // abort on the 3rd cell
+                return { true, false, synth.sweep() };
+            };
+
+            const auto profile = assembleProfile (plan, cap, {}, {});
+            expectEquals (calls, 3, "stops as soon as abort is returned");
+            expectEquals ((int) profile.cells.size(), 2, "2 cells banked before the abort");
+        }
+
+        beginTest ("plan JSON round-trips");
+        {
+            const auto path = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                                  .getChildFile ("statebox_plan_" + juce::Uuid().toString() + ".json");
+
+            std::string e;
+            expect (saveGridPlan (plan, path.getFullPathName().toStdString(), &e), "save: " + juce::String (e));
+
+            GridPlan q;
+            expect (loadGridPlan (path.getFullPathName().toStdString(), q, &e), "load: " + juce::String (e));
+            expectEquals (juce::String (q.name), juce::String (plan.name));
+            expectEquals (q.repetitions, plan.repetitions);
+            expectEquals (q.kernelLength, plan.kernelLength);
+            expectEquals ((int) q.levelsDb.size(), 2);
+            expectEquals ((int) q.knobValues.size(), 3);
+            expectEquals (juce::String (q.knobName), juce::String ("cutoff"));
+            expectWithinAbsoluteError (q.levelsDb[1], -6.0f, 1.0e-4f, "level value preserved");
+            expectWithinAbsoluteError (q.knobValues[1], 0.5f, 1.0e-4f, "knob value preserved");
+
+            path.deleteFile();
+        }
+
+        beginTest ("dbToLinear maps dBFS to amplitude and clamps at 0 dBFS");
+        {
+            expectWithinAbsoluteError (dbToLinear (0.0f),   1.0f,        1.0e-4f, "0 dBFS = 1.0");
+            expectWithinAbsoluteError (dbToLinear (-6.0f),  0.501187f,   1.0e-3f, "-6 dBFS ~ 0.5");
+            expectWithinAbsoluteError (dbToLinear (-20.0f), 0.1f,        1.0e-3f, "-20 dBFS = 0.1");
+            expectWithinAbsoluteError (dbToLinear (6.0f),   1.0f,        1.0e-4f, "positive clamps to 1.0");
+        }
     }
 };
 
@@ -520,6 +675,7 @@ static AlignmentTests          alignmentTests;
 static DcPackTests             dcPackTests;
 static CapturePipelineTests    capturePipelineTests;
 static LiveCaptureTests        liveCaptureTests;
+static GridCaptureTests        gridCaptureTests;
 
 int main()
 {

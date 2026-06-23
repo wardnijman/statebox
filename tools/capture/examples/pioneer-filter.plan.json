@@ -1,0 +1,16 @@
+{
+  "name": "Pioneer Filter",
+  "vendor": "Pioneer",
+  "sweep": { "sr": 96000.0, "f1": 20.0, "f2": 20000.0, "duration": 3.0 },
+  "reps": 5,
+  "conditioning": 2.0,
+  "settle": 0.5,
+  "harmonics": 3,
+  "kernelLength": 4096,
+  "levels": [-18.0, -12.0, -6.0],
+  "knob": {
+    "name": "cutoff",
+    "unit": "normalized",
+    "values": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  }
+}

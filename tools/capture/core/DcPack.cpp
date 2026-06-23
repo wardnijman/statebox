@@ -132,21 +132,24 @@ bool readWavFile (const std::string& path, std::vector<float>& out, double* samp
     return readWav (juce::File { juce::String (path) }, out, sampleRateOut, error);
 }
 
+void normalizeKernels (CaptureKernels& c, float targetPeak)
+{
+    float peak = 0.0f;
+    for (const float s : c.linear) peak = juce::jmax (peak, std::abs (s));
+
+    if (peak <= 0.0f) { c.gain = 1.0f; return; }
+
+    const float g = targetPeak / peak;
+    for (auto& s : c.linear) s *= g;
+    for (auto& h : c.harmonics)
+        for (auto& s : h) s *= g;
+    c.gain = g;
+}
+
 void normalizeProfile (CaptureProfile& profile, float targetPeak)
 {
     for (auto& c : profile.cells)
-    {
-        float peak = 0.0f;
-        for (const float s : c.linear) peak = juce::jmax (peak, std::abs (s));
-
-        if (peak <= 0.0f) { c.gain = 1.0f; continue; }
-
-        const float g = targetPeak / peak;
-        for (auto& s : c.linear) s *= g;
-        for (auto& h : c.harmonics)
-            for (auto& s : h) s *= g;
-        c.gain = g;
-    }
+        normalizeKernels (c, targetPeak);
 }
 
 bool writeDcPack (const CaptureProfile& profile, const std::string& dirPath, std::string* error)

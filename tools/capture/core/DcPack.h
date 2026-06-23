@@ -50,9 +50,13 @@ struct CaptureProfile
     std::vector<CaptureKernels> cells;
 };
 
-// Peak-normalize each cell's linear kernel to targetPeak, scaling its harmonics by
-// the same gain so the Hammerstein relationship between orders is preserved. The
-// applied gain is recorded per cell (original = stored / gain).
+// Peak-normalize one cell's linear kernel to targetPeak, scaling its harmonics by the
+// same gain so the Hammerstein relationship between orders is preserved. Records the
+// applied gain (original = stored / gain). Sets gain, so call exactly once per cell
+// (re-running would overwrite the recorded gain — see incremental grid capture).
+void normalizeKernels (CaptureKernels& cell, float targetPeak = 1.0f);
+
+// Peak-normalize every cell in the profile via normalizeKernels.
 void normalizeProfile (CaptureProfile& profile, float targetPeak = 1.0f);
 
 // Write/read a .dcpack directory (manifest.json + float-WAV kernels). Returns false

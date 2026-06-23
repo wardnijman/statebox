@@ -9,7 +9,8 @@ set(CAPTURE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Alignment.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/DcPack.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/CapturePipeline.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/LiveCaptureEngine.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/LiveCaptureEngine.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/GridCapture.cpp)
 
 set(CAPTURE_JUCE_MODULES
     juce::juce_dsp

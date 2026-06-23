@@ -28,4 +28,22 @@ CaptureProfile buildSingleCellProfile (CaptureKernels kernels,
                                        int kernelLength,
                                        const std::string& name);
 
+// Quality summary of one captured return — drives both the CLI readout and the
+// per-cell grid quality gate. Levels are linear amplitudes (0..1); convert to dBFS
+// for display.
+struct CaptureStats
+{
+    float peak       = 0.0f; // full record
+    float sweepRms   = 0.0f; // sweep portion
+    float noiseFloor = 0.0f; // trailing tail (post-sweep silence)
+    bool  clipping   = false; // peak >= ~0 dBFS
+    bool  silent     = false; // peak below ~-80 dBFS (likely no signal / no mic permission)
+    bool  snrValid   = false;
+    float snrDb      = 0.0f;
+};
+
+// Analyze a captured return. `tailLen` = trailing post-sweep silence (the noise-floor
+// window); the rest is treated as the sweep response.
+CaptureStats analyzeRecording (const std::vector<float>& recording, int tailLen);
+
 } // namespace statebox::capture

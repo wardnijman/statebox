@@ -1,5 +1,8 @@
 #include "CapturePipeline.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include "Deconvolution.h"
 #include "HarmonicSeparation.h"
 #include "Alignment.h"
@@ -57,6 +60,40 @@ CaptureProfile buildSingleCellProfile (CaptureKernels kernels,
 
     p.cells.push_back (std::move (kernels));
     return p;
+}
+
+CaptureStats analyzeRecording (const std::vector<float>& rec, int tailLen)
+{
+    CaptureStats st;
+    if (rec.empty())
+        return st;
+
+    const int n      = (int) rec.size();
+    const int tail   = std::min (std::max (0, tailLen), n);
+    const int sweepN = n - tail;
+
+    for (const float v : rec)
+        st.peak = std::max (st.peak, std::abs (v));
+
+    const auto rms = [] (const float* p, int count) -> float
+    {
+        if (count <= 0) return 0.0f;
+        double acc = 0.0;
+        for (int i = 0; i < count; ++i) acc += (double) p[i] * (double) p[i];
+        return (float) std::sqrt (acc / count);
+    };
+
+    st.sweepRms   = rms (rec.data(), sweepN);
+    st.noiseFloor = rms (rec.data() + sweepN, tail);
+    st.clipping   = st.peak >= 0.99f;
+    st.silent     = st.peak < 1.0e-4f;
+
+    if (st.sweepRms > 1.0e-9f && st.noiseFloor > 1.0e-9f)
+    {
+        st.snrValid = true;
+        st.snrDb    = 20.0f * std::log10 (st.sweepRms / st.noiseFloor);
+    }
+    return st;
 }
 
 } // namespace statebox::capture
