@@ -72,21 +72,26 @@ nonlinear stage (Layer 2). It is **core, not optional** — just intentionally s
 This mirrors the 2018 prototype: the "naive analog behavior" final stage was doing
 the harmonic work; the dynamic convolution did the moving voicing. Keep both.
 
-### Preferred signal architecture (Wiener–Hammerstein-ish)
+### Preferred signal architecture (Wiener–Hammerstein-ish, with a MEASURED nonlinearity)
 
 ```
 input → input gain → state estimator
-      → dynamic PRE convolution     (state-dependent pre-emphasis IR)
-      → small nonlinear memory stage (harmonics / saturation)
-      → dynamic POST convolution    (state-dependent post-emphasis IR)
+      → dynamic PRE convolution   (state-interpolated linear IR bank h1 — voicing/movement)
+      → MEASURED nonlinear block   (parallel-Hammerstein from captured h2,h3) + small hand 'drive'
+      → dynamic POST convolution   (optional, state-dependent post-emphasis)
       → input-modulated noise / residual
       → dry/wet → output gain → safety limiter
 ```
 
-This pre-NL-post topology is far more analog-plausible than a single convolution
-followed by a waveshaper, and is the **target** architecture. The MVP may start
-with a single dynamic convolution → small NL (Milestone 0), then grow the POST
-stage once the sound is validated.
+**Decision (locked):** the harmonics come from a **measured** generalized-Hammerstein
+nonlinearity — the higher-order kernels (h2, h3, …) extracted from the
+exponential-sweep capture (§6) — *plus* a small optional hand-tuned `drive` on top.
+The dynamic convolution bank supplies the moving linear voicing (h1); the measured
+Hammerstein block supplies real, measured harmonics rather than an invented
+waveshape. This pre-NL-post topology is far more analog-plausible than one
+convolution + a guessed waveshaper, and is the **target** architecture. The MVP may
+start with a single dynamic convolution → small hand drive (Milestone 0), then add
+the measured Hammerstein block and POST stage once the sound is validated.
 
 Mental model (not memoryless):
 
@@ -147,7 +152,7 @@ PluginProcessor
 │   ├── StateEstimator       (envelopes, crest, transient, recovery → DynamicState)
 │   ├── ConvolutionBank      (FIXED POOL of always-warm convolvers; used for PRE and POST stages)
 │   ├── KernelInterpolator   (state → per-grid-point weights)
-│   ├── NonlinearStage       (SMALL waveshaper / drive — the ONLY harmonic source)
+│   ├── NonlinearStage       (measured Hammerstein h2,h3 + small hand drive — the ONLY harmonic source)
 │   ├── NoiseResidual        (input-modulated hiss/hum/drift — texture, not harmonics)
 │   ├── DryWetMixer
 │   └── OutputSafetyLimiter
@@ -224,19 +229,24 @@ Rule of thumb for the pool:
 
 Note: PRE and POST dynamic convolutions (§1) each need their own warm pool.
 
-### 5.2 Nonlinear stage (CORE, but intentionally small)
+### 5.2 Nonlinear stage (CORE, MEASURED, but intentionally small)
 
 - This is the **only** source of harmonics / saturation / IMD. Required if the gear
   distorts — but keep it subtle (see the ~10% philosophy in §1). The character
   should come from movement, not crunch.
-- Topology: prefer **Wiener–Hammerstein** — dynamic PRE convolution → static
-  nonlinearity → dynamic POST convolution (§1). The dynamic IRs supply pre/post
-  emphasis; the waveshaper supplies the harmonics.
-- Start simple: a static waveshaper driven by `drive`, oversampled (2–4×) to avoid
-  aliasing. Upgrade path: per-band shaper; later a tiny ML **residual** trained
-  against the real hardware error.
-- Oversample only the nonlinear stage; the linear convolution path does not need
-  oversampling on its own.
+- **Measured, not invented.** The harmonics come from a **parallel/generalized
+  Hammerstein** block whose kernels (h2, h3, …) are extracted from the
+  exponential-sweep capture (Farina higher-order IRs / synchronized swept-sine,
+  §6): `y_nl ≈ h2∗x² + h3∗x³ (+ …)` summed with the linear voicing path. A small
+  hand-tuned `drive` waveshaper sits on top for user control / pushing beyond the
+  measured amount.
+- Topology: **Wiener–Hammerstein** — dynamic PRE convolution → measured Hammerstein
+  NL (+ small drive) → optional dynamic POST convolution (§1).
+- Oversample the nonlinear path (2–4×) to avoid aliasing of the generated
+  harmonics; the linear convolution path does not need oversampling on its own.
+- MVP shortcut: a single dynamic conv → small hand `drive` is fine for Milestone 0;
+  swap in the measured Hammerstein kernels after the go/no-go gate. Later upgrade:
+  a tiny ML **residual** trained against the real hardware error.
 
 ### 5.3 State estimator (the "secret sauce")
 
@@ -257,6 +267,13 @@ validated.
 
 - MVP grid: `level × knob × channel`. Cubic along level, linear/cubic along knob.
 - Interpolating between identical kernels must be a no-op (test it).
+- **Sub-sample alignment is mandatory.** Output-domain interpolation equals
+  coefficient interpolation: `wA·(hA∗x) + wB·(hB∗x) = (wA·hA + wB·hB)∗x`. If two
+  kernels are misaligned by even one sample, the interpolated kernel has two peaks
+  → comb filtering while morphing. Align all grid kernels to a common
+  fractional-sample origin at capture time (§6). Optionally min-phase-reconstruct
+  kernels before banking for better-behaved interpolation (trade-off: discards the
+  unit's real phase character — decide consciously).
 - Level mapping must be smooth; weight changes must be smoothed to avoid zipper
   noise. Modulating the weights *is* what produces the dynamic, non-LTI behavior —
   smooth it, but don't over-smooth or you lose the transient character.
@@ -274,40 +291,92 @@ validated.
 
 ---
 
-## 6. Capture format (`.dcpack`)
+## 6. Capture (`.dcpack`) — format, method, protocol
 
-A capture is a packaged archive (developer reference; large IR audio is NOT stored
-in DAW session state — see §8).
+A capture packages a measured unit (developer reference; large IR audio is NOT
+stored in DAW session state — see §8). Mental model: you are **sampling states of a
+system**, reconstructing `f(input, state) → output` — not "recording a filter."
 
 ```
 MyUnit.dcpack
 ├── manifest.json
-├── kernels/   (L_level_00_knob_00.wav, R_level_00_knob_00.wav, ...; multiple variants allowed per cell)
-├── noise/     (optional idle noise/hum profiles for the residual layer)
-└── metadata/  (measurement notes)
+├── kernels/    (linear IRs h1: L_level_00_knob_00.wav, ...; variants allowed per cell)
+├── harmonics/  (measured higher-order kernels h2,h3,... per operating point)
+├── temporal/   (Dataset B: step/recovery/hysteresis measurements)
+├── noise/      (idle noise/hum profiles for the residual layer)
+└── metadata/   (measurement notes, calibration)
 ```
 
-`manifest.json` carries: formatVersion, name/vendor, sampleRate,
-kernelLengthSamples, channels, axes (level dBFS list, knob list), normalization
-(referenceDbfs, trimMode), latencySamples, createdWith.
+`manifest.json` carries: formatVersion, name/vendor, sampleRate (capture, e.g.
+96000), bitDepth, kernelLengthSamples, channels, axes (level list + units, knob
+list), normalization (referenceDbfs, trimMode), latencyReferenceSamples (measured
+loopback), inputCalibration (dBFS↔analog level, e.g. −18 dBFS = +4 dBu),
+harmonicOrders captured, createdWith.
 
-Two capture modes (support both):
-- **A. IR-train capture** — historically close to the 2018 prototype; good for
-  level-dependent *snapshots*. Acceptable, lower SNR.
-- **B. Exponential sine sweep (Farina)** — better SNR; can separate harmonic
-  orders; better for nonlinear / Volterra-style analysis. Preferred for quality
-  captures; deconvolve to the IR.
+### Canonical method: exponential sine sweep (ESS / Farina)
 
-Methodology notes (do not skip):
-- A kernel captured at amplitude A (especially via louder impulses) is an
-  **effective describing-function snapshot**, not a pure linear IR — the
-  nonlinearity is partly baked in. Treat it as such; it does NOT replace the
-  explicit nonlinear stage (§5.2).
-- IRs are sample-rate-specific. Resample `sourceSampleRate → runtimeSampleRate`
-  carefully; `RuntimeProfile` tracks both.
-- Validation metrics per kernel: onset confidence, peak level, noise floor, DC
-  offset, length adequacy, L/R phase consistency, deviation across repeats.
-- Optionally capture the unit's idle noise/hum for the residual layer (§5.5).
+Retire manual impulse-train detection (keep it only for experimentation). Use ESS:
+- Deconvolve the recorded sweep against the inverse filter → linear IR `h1` at t=0.
+- **The nonlinearity is separated, not baked in.** Harmonic products appear as
+  their own IRs at *negative* time offsets (Δt_N = T·ln(N)/ln(f2/f1) before h1).
+  Window them out → h2, h3, … = the **measured Hammerstein** kernels (§5.2). (See
+  Farina 2000; Novak et al. synchronized swept-sine, for the parallel-Hammerstein
+  identification.) This is why ESS beats louder impulses: a raw louder-impulse /
+  sine-tone capture yields a *describing-function snapshot* that mixes the
+  nonlinearity into the kernel; ESS gives a clean h1 **and** the separable harmonics.
+
+### Per-operating-point protocol (deterministic)
+
+Identical scripted sequence for every grid point, repeated N≥5×:
+```
+reset → 2 s conditioning (pink noise or sine at operating level)
+      → settle 200 ms → 3 s ESS (20 Hz→20 kHz) → settle 500 ms → store
+```
+- **Pre-conditioning is mandatory** — analog gear has memory; "silent 10 s then
+  measure" ≠ "hammered 10 s then measure." Fixed inter-measurement timing controls
+  thermal/memory state.
+- Store **mean** (the deterministic kernel) + **std-dev** + raw variants. The
+  std-dev map is itself a feature: it shows where the unit is "alive"
+  (drift/instability) and where to spend the noise/variant budget (§5.5). Modes:
+  stable=mean, analog=sample a variant, research=analyze drift.
+
+### Alignment & calibration (don't skip — interpolation depends on it)
+
+- **Loopback latency reference:** measure interface-out→in directly once; subtract
+  from every capture. Required for absolute timing, dry/wet phase coherence, and
+  sub-sample aligning all kernels to a common origin (§5.4).
+- **Level-axis units:** a sweep is constant-amplitude with ~3 dB crest factor;
+  program material is 10–20 dB. Pin the level axis to the **analog input level at
+  the unit** (calibrated, e.g. −18 dBFS ↔ +4 dBu), and give the plugin a mapping
+  from runtime envelope statistics to that axis. Don't push the AD past 0 dBFS —
+  stage gain so "+3 dB" lands at the unit, not the converter.
+
+### Two datasets
+
+- **Dataset A — static personality:** the `level × knob` grid of ESS captures →
+  h1 bank + h2/h3 harmonic kernels. Quasi-static; ESS smears any fast dynamics
+  during the sweep, so this is the *average* response at each operating point.
+- **Dataset B — temporal behavior** → parameters for the StateEstimator (§5.3):
+  - step up/down at several levels → attack/release → `recovery_ms`
+  - ascending vs descending level staircase → `hysteresis`
+  - quiet→transient→quiet → overshoot/ringing → `transientAmount`
+  - two-tone IMD (e.g. 19+20 kHz) → quantify/validate the Hammerstein nonlinearity
+  - repeat-over-time → thermal drift → noise/variant layer
+
+### Hardware setup
+Interface Out → unit → Interface In; same clock; AGC/limiters/monitoring FX off;
+96 kHz / 24-bit. IRs are sample-rate-specific — resample
+`sourceSampleRate → runtimeSampleRate` carefully (`RuntimeProfile` tracks both).
+
+### Validation metrics per kernel
+onset confidence, peak level, noise floor, DC offset, length adequacy, L/R phase
+consistency, deviation across repeats, harmonic-IR SNR.
+
+### Build-order note
+The capture utility is ~half the project. **Do not let it gate Milestone 0** —
+hand-capture 3–6 kernels (a sweep + any deconvolution tool, or synthetic) to prove
+the engine sounds magical first; build the polished utility after the go/no-go gate
+(§10).
 
 ---
 
@@ -442,11 +511,15 @@ Source/
 ├── parameters/  ParameterIDs.h  ParameterLayout.h  ParameterSnapshot.h
 ├── dsp/         DynamicConvolutionEngine.{h,cpp}  StateEstimator.h  ConvolutionBank.h
 │                KernelInterpolator.h  NonlinearStage.h  NoiseResidual.h  DryWetMixer.h
-├── capture/     CaptureManifest.h  CaptureLibrary.h  CaptureLoader.h  KernelGrid.h  RuntimeProfile.h
+├── capture/     CaptureManifest.h  CaptureLibrary.h  CaptureLoader.h  KernelGrid.h  RuntimeProfile.h  HammersteinKernels.h
 ├── state/       StateStore.h  PresetManager.h  MidiMappings.h
 ├── ui/          MainPanel.h  MeterView.h  KernelMapView.h  CaptureBrowser.h  AdvancedPanel.h
 └── tests/       CaptureExtractionTests.cpp  StateRoundtripTests.cpp  DynamicConvolutionTests.cpp
 ```
+
+The **Statebox Capture Utility** (ESS → deconvolve → separate h1/h2/h3 → align →
+normalize → write `.dcpack`) is a **separate target/app**, built *after* Milestone 0
+— not part of the plugin binary.
 
 ---
 
