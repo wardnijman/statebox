@@ -431,7 +431,16 @@ the convolver set) rather than retuning latency live during playback.
 
 ## 10. Build order, milestones & MVP scope
 
-**Prove the DSP and the *sound* before any plugin plumbing.** Recommended order:
+**Project decision (2026-06-23):** the dynamic-convolution *sound* was already
+validated by Ward's 2018 prototype, so Milestone 0's "does it sound magical?"
+purpose is essentially satisfied. Captures are labor-intensive and gate all
+downstream real-world data, so we are **building the Capture Tool FIRST** (see the
+Capture Tool plan at the end of this section and §6), then the plugin engine.
+Milestone 0 remains a useful quick sanity check once the tool produces real
+captures, but it no longer blocks.
+
+**Default plugin order** (applies once engine work begins — **prove DSP/sound
+before plugin plumbing**):
 
 1. Milestone 0 offline / standalone renderer (below)
 2. Real/synthetic kernel-bank loading + test
@@ -465,6 +474,26 @@ in-plugin capture workflow, multi-axis grids, cloud/marketplace.
 **MVP success criterion:** with one captured unit (multiple level kernels), the
 plugin smoothly morphs level-dependent responses with subtle drive, no clicks,
 correct automation/save/restore/undo, reported latency, and stable CPU.
+
+### Capture Tool — phased plan (the current first build)
+
+A **separate JUCE console-app target** (`tools/capture/`, not the plugin binary).
+One stack end-to-end (JUCE `dsp::FFT`, `AudioFormat`, `AudioBuffer`) so the DSP
+carries straight into the live front-end and the plugin — no throwaway context.
+
+1. **Offline DSP core + CLI + self-tests** — sweep generation, ESS deconvolution,
+   harmonic-order separation (h1 + h2/h3), loopback-latency + sub-sample alignment,
+   normalization, `.dcpack` writer/reader. Verifiable with no audio hardware: a
+   synthetic sweep through a known polynomial nonlinearity must recover the known
+   harmonic kernels; round-trip a `.dcpack`. Locks the format (keep it
+   engine-driven — don't capture data the engine can't use, or omit what it needs).
+2. **Live capture front-end** (`juce_audio_devices`) — scripted sequence
+   (condition → settle → sweep → settle → store), N reps → mean + std, loopback
+   reference, level calibration.
+3. **GUI / polish** — operating-point grid editor, run/abort, validation meters,
+   `.dcpack` browser. The "press Capture Profile" experience.
+
+Dataset B (temporal, §6) follows once Dataset A captures work.
 
 ---
 
@@ -517,9 +546,10 @@ Source/
 └── tests/       CaptureExtractionTests.cpp  StateRoundtripTests.cpp  DynamicConvolutionTests.cpp
 ```
 
-The **Statebox Capture Utility** (ESS → deconvolve → separate h1/h2/h3 → align →
-normalize → write `.dcpack`) is a **separate target/app**, built *after* Milestone 0
-— not part of the plugin binary.
+The **Statebox Capture Tool** (ESS → deconvolve → separate h1/h2/h3 → align →
+normalize → write `.dcpack`) is a **separate JUCE console-app target** at
+`tools/capture/` (not part of the plugin binary). Per §10 it is the **first** thing
+built (offline DSP core), with live audio I/O and a GUI layered on later.
 
 ---
 
