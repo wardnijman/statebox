@@ -33,17 +33,35 @@ CaptureProfile buildSingleCellProfile (CaptureKernels kernels,
 // for display.
 struct CaptureStats
 {
-    float peak       = 0.0f; // full record
-    float sweepRms   = 0.0f; // sweep portion
-    float noiseFloor = 0.0f; // trailing tail (post-sweep silence)
-    bool  clipping   = false; // peak >= ~0 dBFS
-    bool  silent     = false; // peak below ~-80 dBFS (likely no signal / no mic permission)
-    bool  snrValid   = false;
-    float snrDb      = 0.0f;
+    float peak           = 0.0f; // full record
+    float sweepRms       = 0.0f; // measured over the latency-shifted sweep return
+    float noiseFloor     = 0.0f; // genuinely-silent region after the return ends
+    int   latencySamples = 0;    // detected onset = round-trip latency of the return
+    bool  clipping       = false; // peak >= ~0 dBFS
+    bool  silent         = false; // peak below ~-80 dBFS (likely no signal / no mic permission)
+    bool  noiseFloorValid = false; // false if the tail is too short to contain clean silence
+    bool  snrValid       = false;
+    float snrDb          = 0.0f;
 };
 
-// Analyze a captured return. `tailLen` = trailing post-sweep silence (the noise-floor
-// window); the rest is treated as the sweep response.
+// Analyze a captured return. `tailLen` = nominal trailing silence in the recording.
+// Latency-aware: detects where the sweep return actually begins (round-trip latency),
+// measures the sweep over [onset, onset+sweepLen], and the noise floor only over the
+// silence *after* the return ends — so the SNR isn't polluted by the sweep bleeding
+// past the nominal boundary (see capture readout). noiseFloorValid is false when the
+// tail is too short to hold any clean silence (increase --settle).
 CaptureStats analyzeRecording (const std::vector<float>& recording, int tailLen);
+
+// Per-kernel quality: peak position/value and impulse "sharpness" = peak vs the RMS
+// outside a guard around it. A wire loopback deconvolves to a near-delta -> very high
+// sharpness; a real IR has spread -> lower. Used by the `inspect` command.
+struct KernelStats
+{
+    int   peakIndex   = 0;
+    float peakValue   = 0.0f; // signed
+    float sharpnessDb = 0.0f; // 20*log10(|peak| / rms-outside-guard)
+};
+
+KernelStats analyzeKernel (const std::vector<float>& kernel, int guard = 16);
 
 } // namespace statebox::capture

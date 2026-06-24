@@ -35,6 +35,8 @@ public:
     bool isFinished()           const noexcept { return finished_; }
     int  currentRepetition()    const noexcept { return rep_; }
     int  recordLengthSamples()  const noexcept { return recordLen_; }
+    int  sweepLengthSamples()   const noexcept { return sweepLen_; }
+    int  tailLengthSamples()    const noexcept { return tail_; }   // post-sweep silence = noise-floor window
     int  totalRepetitions()     const noexcept { return cfg_.repetitions; }
 
     void finalize();

@@ -14,6 +14,10 @@
 //       Capture a level x knob grid into one .dcpack: auto-steps the level axis,
 //       prompts for each knob position, writes incrementally so it can resume.
 //
+//   inspect --in unit.dcpack
+//       Print a .dcpack's metadata + per-cell kernel stats (peak, impulse sharpness,
+//       harmonic levels) — e.g. a wire loopback should show a near-delta linear IR.
+//
 // See CLAUDE.md §6 and §10. A GUI comes in a later increment.
 
 #include <algorithm>
@@ -85,16 +89,29 @@ juce::String dbfs (float linear)
     return juce::String (20.0f * std::log10 (linear), 1);
 }
 
-// Print peak / sweep RMS / noise floor so a capture is interpretable (got signal?
-// clipping? silent?) rather than just "Wrote .dcpack".
-void printStats (const CaptureStats& st)
+// Print peak / sweep RMS / noise floor / latency so a capture is interpretable (got
+// signal? clipping? silent?) rather than just "Wrote .dcpack".
+void printStats (const CaptureStats& st, double sampleRate)
 {
     std::cout << "  peak       : " << dbfs (st.peak) << " dBFS"
               << (st.clipping ? "   *** CLIPPING — reduce --sweep-level or input trim ***" : "") << "\n";
     std::cout << "  sweep RMS  : " << dbfs (st.sweepRms) << " dBFS\n";
-    std::cout << "  noise floor: " << dbfs (st.noiseFloor) << " dBFS";
-    if (st.snrValid)
-        std::cout << "   (SNR " << juce::String (st.snrDb, 1) << " dB)";
+
+    if (st.noiseFloorValid)
+    {
+        std::cout << "  noise floor: " << dbfs (st.noiseFloor) << " dBFS";
+        if (st.snrValid)
+            std::cout << "   (SNR " << juce::String (st.snrDb, 1) << " dB)";
+        std::cout << "\n";
+    }
+    else
+    {
+        std::cout << "  noise floor: n/a (tail too short after the return — increase --settle)\n";
+    }
+
+    std::cout << "  latency    : " << st.latencySamples << " samples";
+    if (sampleRate > 0.0)
+        std::cout << " (" << juce::String (1000.0 * st.latencySamples / sampleRate, 1) << " ms)";
     std::cout << "\n";
 
     if (st.silent)
@@ -351,7 +368,7 @@ int main (int argc, char* argv[])
                               juce::ConsoleApplication::fail ("capture timed out (no audio callbacks?)");
 
                           std::cout << "Captured return:\n";
-                          printStats (analyzeRecording (cap.mean, cap.tailLen));
+                          printStats (analyzeRecording (cap.mean, cap.tailLen), cfg.sweep.sampleRate);
 
                           SweepSynth synth (cfg.sweep);
                           auto kernels = processRecording (cap.mean, synth, maxHarmonic, kernelLength);
@@ -470,7 +487,7 @@ int main (int argc, char* argv[])
                                   }
 
                                   const auto st = analyzeRecording (cap.mean, cap.tailLen);
-                                  printStats (st);
+                                  printStats (st, plan.sweep.sampleRate);
 
                                   if (st.clipping || st.silent)
                                   {
@@ -518,6 +535,51 @@ int main (int argc, char* argv[])
 
                           std::cout << "\nWrote " << profile.cells.size() << "/" << total
                                     << " cell(s) -> " << outPath << "\n";
+                      } });
+
+    app.addCommand ({ "inspect",
+                      "inspect --in UNIT.dcpack",
+                      "Print a .dcpack's metadata and per-cell kernel stats (peak, sharpness, harmonics).",
+                      {},
+                      [] (const juce::ArgumentList& args)
+                      {
+                          const auto inPath = optValue (args, "--in");
+                          if (inPath.isEmpty())
+                              juce::ConsoleApplication::fail ("--in is required");
+
+                          CaptureProfile p;
+                          std::string    e;
+                          if (! readDcPack (inPath.toStdString(), p, &e))
+                              juce::ConsoleApplication::fail ("read .dcpack failed: " + juce::String (e));
+
+                          std::cout << p.name << " (" << p.vendor << ")\n"
+                                    << "  sr=" << p.sampleRate << " Hz, kernelLength=" << p.kernelLengthSamples
+                                    << ", channels=" << p.channels << ", cells=" << p.cells.size()
+                                    << ", latencyRef=" << p.latencyReferenceSamples << "\n  harmonics:";
+                          for (const int h : p.harmonicOrders) std::cout << " h" << h;
+                          std::cout << "\n  " << p.levelAxis.name << " (" << p.levelAxis.unit << "):";
+                          for (const float v : p.levelAxis.values) std::cout << " " << v;
+                          std::cout << "\n  " << p.knobAxis.name << " (" << p.knobAxis.unit << "):";
+                          for (const float v : p.knobAxis.values) std::cout << " " << v;
+                          std::cout << "\n";
+
+                          for (const auto& c : p.cells)
+                          {
+                              const auto ks = analyzeKernel (c.linear);
+                              std::cout << "  [L" << c.levelIndex << " K" << c.knobIndex << " ch" << c.channel << "]"
+                                        << " peak " << dbfs (std::abs (ks.peakValue)) << " dBFS @ " << ks.peakIndex
+                                        << ", sharpness " << juce::String (ks.sharpnessDb, 1) << " dB"
+                                        << ", gain " << juce::String (c.gain, 3);
+
+                              const float h1 = std::abs (ks.peakValue);
+                              for (size_t h = 0; h < c.harmonics.size(); ++h)
+                              {
+                                  float hm = 0.0f;
+                                  for (const float s : c.harmonics[h]) hm = std::max (hm, std::abs (s));
+                                  std::cout << ", h" << (h + 2) << "/h1 " << dbfs (h1 > 0.0f ? hm / h1 : 0.0f) << " dB";
+                              }
+                              std::cout << "\n";
+                          }
                       } });
 
     // JUCE's ConsoleApplication treats every '-'-leading token as an option, so a bare

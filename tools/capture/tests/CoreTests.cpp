@@ -447,21 +447,49 @@ public:
             dir.deleteRecursively();
         }
 
-        beginTest ("analyzeRecording reports peak/SNR and flags clipping & silence");
+        beginTest ("analyzeRecording is latency-aware: finds onset, measures clean noise floor");
         {
-            const int sweepN = 1000, tail = 200;
-            std::vector<float> rec ((size_t) (sweepN + tail), 0.0f);
-            for (int i = 0; i < sweepN; ++i) rec[(size_t) i]            = 0.5f * std::sin (0.1f * i);
-            for (int i = 0; i < tail;   ++i) rec[(size_t) (sweepN + i)] = 0.001f * std::sin (0.3f * i);
+            // A return shifted by `latency`, with quiet noise filling the silent regions.
+            const int latency = 100, sweepLen = 1000, tail = 1000;
+            const int n = sweepLen + tail;
+            std::vector<float> rec ((size_t) n, 0.0f);
+            for (int i = 0; i < sweepLen; ++i) rec[(size_t) (latency + i)] = 0.5f * std::sin (0.1f * i);
+            for (int i = 0; i < n; ++i)        rec[(size_t) i]            += 1.0e-4f * std::sin (0.37f * i);
 
             const auto st = analyzeRecording (rec, tail);
-            expectWithinAbsoluteError (st.peak, 0.5f, 1.0e-3f, "peak measured");
-            expect (! st.clipping, "0.5 not clipping");
-            expect (! st.silent, "0.5 not silent");
-            expect (st.snrValid && st.snrDb > 30.0f, "loud sweep over quiet tail -> healthy SNR");
+            expect (std::abs (st.latencySamples - latency) <= 8,
+                    "onset ~ latency (" + juce::String (st.latencySamples) + ")");
+            expectWithinAbsoluteError (st.peak, 0.5f, 2.0e-3f, "peak measured");
+            expect (! st.clipping && ! st.silent, "flags clear");
+            expect (st.noiseFloorValid, "tail long enough to measure noise floor");
+            expect (st.snrValid && st.snrDb > 50.0f,
+                    "clean post-return silence -> high SNR (" + juce::String (st.snrDb, 1) + " dB)");
+        }
+
+        beginTest ("analyzeRecording flags a too-short tail, clipping, and silence");
+        {
+            // Tail shorter than latency+guard -> no clean silence to measure.
+            std::vector<float> shortTail (1200, 0.2f);
+            const auto stShort = analyzeRecording (shortTail, 100);
+            expect (! stShort.noiseFloorValid, "short tail -> noise floor not measurable");
 
             expect (analyzeRecording (std::vector<float> (500, 1.0f), 100).clipping, "full-scale -> clipping");
             expect (analyzeRecording (std::vector<float> (500, 0.0f), 100).silent, "zeros -> silent");
+        }
+
+        beginTest ("analyzeKernel scores a clean impulse high and a spread kernel low");
+        {
+            std::vector<float> impulse (256, 0.0f);
+            impulse[128] = 1.0f;
+            const auto a = analyzeKernel (impulse);
+            expectEquals (a.peakIndex, 128, "impulse peak located");
+            expectWithinAbsoluteError (a.peakValue, 1.0f, 1.0e-6f, "impulse peak value");
+            expectGreaterThan (a.sharpnessDb, 60.0f, "delta -> very sharp");
+
+            std::vector<float> spread (256, 0.1f);
+            spread[128] = 0.2f;
+            const auto b = analyzeKernel (spread);
+            expectLessThan (b.sharpnessDb, 20.0f, "energy everywhere -> not sharp");
         }
     }
 };
