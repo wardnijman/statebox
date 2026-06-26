@@ -16,7 +16,9 @@ FetchContent_Declare(JUCE
 FetchContent_MakeAvailable(JUCE)
 
 # --- Targets -----------------------------------------------------------------
-# The Capture Tool is built first (see CLAUDE.md §10). The plugin target is added
-# later once the capture/.dcpack format is exercised end-to-end.
+# The Capture Tool was built first (see CLAUDE.md §10). The Milestone-0 offline
+# renderer (Source/dsp engine + tools/render CLI) follows, validated against real
+# captures. The JUCE plugin shell comes after the go/no-go gate.
 enable_testing()
 add_subdirectory(tools/capture)
+add_subdirectory(tools/render)
