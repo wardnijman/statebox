@@ -25,6 +25,7 @@ CaptureProfile makeProfileShell (const GridPlan& plan)
     p.bitDepth            = 24;
     p.kernelLengthSamples = plan.kernelLength;
     p.channels            = 1; // mono capture (CLAUDE.md: crosstalk negligible for in-scope gear)
+    p.latencyReferenceSamples = plan.latencyReferenceSamples;
     p.levelAxis           = ProfileAxis { "level", "dBFS-at-output", plan.levelsDb };
     p.knobAxis            = ProfileAxis { plan.knobName, plan.knobUnit, plan.knobValues };
 
@@ -138,6 +139,7 @@ bool loadGridPlan (const std::string& path, GridPlan& out, std::string* error)
     if (const auto v = get ("settle");       ! v.isVoid()) out.settle       = (double) v;
     if (const auto v = get ("harmonics");    ! v.isVoid()) out.maxHarmonic  = (int) v;
     if (const auto v = get ("kernelLength"); ! v.isVoid()) out.kernelLength = (int) v;
+    if (const auto v = get ("latencyRef");   ! v.isVoid()) out.latencyReferenceSamples = (int) v;
 
     out.levelsDb.clear();
     if (auto* arr = get ("levels").getArray())
@@ -178,6 +180,8 @@ bool saveGridPlan (const GridPlan& plan, const std::string& path, std::string* e
     root->setProperty ("settle",       plan.settle);
     root->setProperty ("harmonics",    plan.maxHarmonic);
     root->setProperty ("kernelLength", plan.kernelLength);
+    if (plan.latencyReferenceSamples != 0)
+        root->setProperty ("latencyRef", plan.latencyReferenceSamples);
 
     juce::Array<juce::var> levels;
     for (const float d : plan.levelsDb) levels.add (d);

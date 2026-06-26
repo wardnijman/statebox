@@ -18,6 +18,10 @@
 //       Print a .dcpack's metadata + per-cell kernel stats (peak, impulse sharpness,
 //       harmonic levels) — e.g. a wire loopback should show a near-delta linear IR.
 //
+//   measure-latency [...]
+//       Measure interface round-trip latency from a bare loopback; prints the value to
+//       feed back as --latency-ref. Captures also auto-store the measured onset.
+//
 // See CLAUDE.md §6 and §10. A GUI comes in a later increment.
 
 #include <algorithm>
@@ -368,7 +372,8 @@ int main (int argc, char* argv[])
                               juce::ConsoleApplication::fail ("capture timed out (no audio callbacks?)");
 
                           std::cout << "Captured return:\n";
-                          printStats (analyzeRecording (cap.mean, cap.tailLen), cfg.sweep.sampleRate);
+                          const auto st = analyzeRecording (cap.mean, cap.tailLen);
+                          printStats (st, cfg.sweep.sampleRate);
 
                           SweepSynth synth (cfg.sweep);
                           auto kernels = processRecording (cap.mean, synth, maxHarmonic, kernelLength);
@@ -376,17 +381,24 @@ int main (int argc, char* argv[])
                                                                  kernelLength, name.toStdString());
                           normalizeProfile (profile, 1.0f);
 
+                          // Loopback latency reference: explicit --latency-ref, else the measured onset.
+                          if (const auto v = optValue (args, "--latency-ref"); v.isNotEmpty())
+                              profile.latencyReferenceSamples = v.getIntValue();
+                          else
+                              profile.latencyReferenceSamples = st.latencySamples;
+
                           std::string err;
                           if (! writeDcPack (profile, outPath.toStdString(), &err))
                               juce::ConsoleApplication::fail ("write .dcpack failed: " + juce::String (err));
 
-                          std::cout << "Wrote .dcpack -> " << outPath << "\n";
+                          std::cout << "Wrote .dcpack -> " << outPath
+                                    << "  (latencyRef " << profile.latencyReferenceSamples << " samples)\n";
                       } });
 
     app.addCommand ({ "capture-grid",
                       "capture-grid --out UNIT.dcpack (--plan PLAN.json | --levels dB,dB,.. --knob NAME:v,v,..) "
-                      "[--resume --dry-run --sr R --f1 F --f2 F --duration S --reps N --conditioning S "
-                      "--settle S --harmonics N --kernel-length L --name NAME --vendor V]",
+                      "[--resume --dry-run --latency-ref N --sr R --f1 F --f2 F --duration S --reps N "
+                      "--conditioning S --settle S --harmonics N --kernel-length L --name NAME --vendor V]",
                       "Capture a level x knob grid into one .dcpack (auto-steps level, prompts per knob).",
                       {},
                       [] (const juce::ArgumentList& args)
@@ -407,9 +419,13 @@ int main (int argc, char* argv[])
                               plan = planFromArgs (args);
                           }
 
-                          // Name/vendor can override the plan from the command line.
-                          if (const auto v = optValue (args, "--name");   v.isNotEmpty()) plan.name   = v.toStdString();
-                          if (const auto v = optValue (args, "--vendor"); v.isNotEmpty()) plan.vendor = v.toStdString();
+                          // Name/vendor/latency can override the plan from the command line.
+                          if (const auto v = optValue (args, "--name");        v.isNotEmpty()) plan.name   = v.toStdString();
+                          if (const auto v = optValue (args, "--vendor");      v.isNotEmpty()) plan.vendor = v.toStdString();
+                          const bool latencyExplicit = optValue (args, "--latency-ref").isNotEmpty()
+                                                       || plan.latencyReferenceSamples != 0;
+                          if (const auto v = optValue (args, "--latency-ref"); v.isNotEmpty())
+                              plan.latencyReferenceSamples = v.getIntValue();
 
                           if (plan.levelsDb.empty() || plan.knobValues.empty())
                               juce::ConsoleApplication::fail ("need at least one level and one knob value "
@@ -461,7 +477,10 @@ int main (int argc, char* argv[])
                                     << " knob position(s) = " << total << " cells.\n";
 
                           // Capture one cell, with a retry gate on clipping / silence / timeout.
-                          auto captureCell = [&dm, &plan] (int li, int /*ki*/, float sweepLevel,
+                          // measuredLatency records the onset of the first accepted cell, used as the
+                          // latency reference when none was supplied explicitly.
+                          int  measuredLatency = -1;
+                          auto captureCell = [&dm, &plan, &measuredLatency] (int li, int /*ki*/, float sweepLevel,
                                                            float levelDb, float /*knobVal*/) -> CellCapture
                           {
                               LiveCaptureConfig cfg;
@@ -494,9 +513,11 @@ int main (int argc, char* argv[])
                                       const char c = prompt ("  problem — [c]ontinue anyway / [s]kip / [a]bort / Enter=retry: ");
                                       if (c == 'a') return { false, true, {} };
                                       if (c == 's') return { false, false, {} };
-                                      if (c == 'c') return { true, false, cap.mean };
+                                      if (c == 'c') return { true, false, cap.mean }; // accepted despite problem
                                       continue; // retry
                                   }
+
+                                  if (measuredLatency < 0) measuredLatency = st.latencySamples;
                                   return { true, false, cap.mean };
                               }
                           };
@@ -529,12 +550,56 @@ int main (int argc, char* argv[])
                               return;
                           }
 
+                          // Store the loopback latency reference: explicit wins, else the measured onset.
+                          if (! latencyExplicit && measuredLatency >= 0)
+                              profile.latencyReferenceSamples = measuredLatency;
+
                           std::string werr;
                           if (! writeDcPack (profile, outPath.toStdString(), &werr))
                               juce::ConsoleApplication::fail ("write .dcpack failed: " + juce::String (werr));
 
                           std::cout << "\nWrote " << profile.cells.size() << "/" << total
-                                    << " cell(s) -> " << outPath << "\n";
+                                    << " cell(s) -> " << outPath
+                                    << "  (latencyRef " << profile.latencyReferenceSamples << " samples)\n";
+                      } });
+
+    app.addCommand ({ "measure-latency",
+                      "measure-latency [--sr R --f1 F --f2 F --duration S --reps N --sweep-level G --settle S]",
+                      "Measure interface round-trip latency from a bare loopback (patch output -> input).",
+                      {},
+                      [] (const juce::ArgumentList& args)
+                      {
+                          LiveCaptureConfig cfg;
+                          cfg.sweep               = sweepFromArgs (args);
+                          cfg.conditioningSeconds = 0.0;  // no conditioning needed for a latency probe
+                          cfg.repetitions         = 1;
+                          cfg.sweepLevel          = 0.3f; // gentle by default
+                          if (const auto v = optValue (args, "--reps");        v.isNotEmpty()) cfg.repetitions   = v.getIntValue();
+                          if (const auto v = optValue (args, "--settle");      v.isNotEmpty()) cfg.settleSeconds = v.getDoubleValue();
+                          if (const auto v = optValue (args, "--sweep-level"); v.isNotEmpty()) cfg.sweepLevel    = juce::jlimit (0.0f, 1.0f, (float) v.getDoubleValue());
+
+                          juce::MessageManager::getInstance();
+                          juce::AudioDeviceManager dm;
+                          juce::String derr;
+                          if (! openCaptureDevice (dm, cfg.sweep.sampleRate, derr))
+                              juce::ConsoleApplication::fail ("audio device init failed: " + derr);
+
+                          std::cout << "Patch output -> input directly (bare loopback). Measuring...\n";
+                          const auto cap = runCapture (dm, cfg);
+                          dm.closeAudioDevice();
+
+                          if (! cap.finished)
+                              juce::ConsoleApplication::fail ("capture timed out (no audio callbacks?)");
+
+                          const auto st = analyzeRecording (cap.mean, cap.tailLen);
+                          printStats (st, cfg.sweep.sampleRate);
+
+                          if (st.silent)
+                              juce::ConsoleApplication::fail ("no signal — is the loopback patched?");
+
+                          std::cout << "\nLoopback latency reference: " << st.latencySamples << " samples ("
+                                    << juce::String (1000.0 * st.latencySamples / cfg.sweep.sampleRate, 1) << " ms)\n"
+                                    << "Pass it to captures with:  --latency-ref " << st.latencySamples << "\n";
                       } });
 
     app.addCommand ({ "inspect",

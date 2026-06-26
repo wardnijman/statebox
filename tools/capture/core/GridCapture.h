@@ -26,6 +26,7 @@ struct GridPlan
     double settle       = 0.5;       // seconds of silence before the sweep, and tail after
     int    maxHarmonic  = 3;
     int    kernelLength = 4096;
+    int    latencyReferenceSamples = 0; // interface loopback latency (measure-latency); 0 = auto
 
     std::vector<float> levelsDb;     // dBFS-at-output (<= 0); auto-stepped, no human needed
     std::string        knobName  = "knob";

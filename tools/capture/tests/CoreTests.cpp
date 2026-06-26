@@ -537,6 +537,7 @@ public:
             expectEquals ((int) profile.knobAxis.values.size(), 3);
             expectEquals (juce::String (profile.knobAxis.name), juce::String ("cutoff"));
             expectEquals (profile.channels, 1, "mono capture");
+            expectEquals (profile.latencyReferenceSamples, 0, "no latency ref by default");
 
             std::vector<int> seen (6, 0);
             for (const auto& c : profile.cells)
@@ -599,26 +600,42 @@ public:
             expectEquals ((int) profile.cells.size(), 2, "2 cells banked before the abort");
         }
 
-        beginTest ("plan JSON round-trips");
+        beginTest ("plan JSON round-trips (incl. latency reference)");
         {
+            GridPlan src = plan;
+            src.latencyReferenceSamples = 1528;
+
             const auto path = juce::File::getSpecialLocation (juce::File::tempDirectory)
                                   .getChildFile ("statebox_plan_" + juce::Uuid().toString() + ".json");
 
             std::string e;
-            expect (saveGridPlan (plan, path.getFullPathName().toStdString(), &e), "save: " + juce::String (e));
+            expect (saveGridPlan (src, path.getFullPathName().toStdString(), &e), "save: " + juce::String (e));
 
             GridPlan q;
             expect (loadGridPlan (path.getFullPathName().toStdString(), q, &e), "load: " + juce::String (e));
-            expectEquals (juce::String (q.name), juce::String (plan.name));
-            expectEquals (q.repetitions, plan.repetitions);
-            expectEquals (q.kernelLength, plan.kernelLength);
+            expectEquals (juce::String (q.name), juce::String (src.name));
+            expectEquals (q.repetitions, src.repetitions);
+            expectEquals (q.kernelLength, src.kernelLength);
             expectEquals ((int) q.levelsDb.size(), 2);
             expectEquals ((int) q.knobValues.size(), 3);
             expectEquals (juce::String (q.knobName), juce::String ("cutoff"));
             expectWithinAbsoluteError (q.levelsDb[1], -6.0f, 1.0e-4f, "level value preserved");
             expectWithinAbsoluteError (q.knobValues[1], 0.5f, 1.0e-4f, "knob value preserved");
+            expectEquals (q.latencyReferenceSamples, 1528, "latency reference preserved");
 
             path.deleteFile();
+        }
+
+        beginTest ("assembleProfile carries the plan's latency reference into the profile");
+        {
+            GridPlan src = plan;
+            src.latencyReferenceSamples = 1590;
+            auto cap = [&] (int, int, float, float, float) -> CellCapture
+            {
+                return { true, false, synth.sweep() };
+            };
+            const auto profile = assembleProfile (src, cap, {}, {});
+            expectEquals (profile.latencyReferenceSamples, 1590, "latency ref propagated to profile");
         }
 
         beginTest ("dbToLinear maps dBFS to amplitude and clamps at 0 dBFS");
